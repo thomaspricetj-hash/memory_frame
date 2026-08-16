@@ -1,0 +1,64 @@
+[package]
+name = "memory_frame"
+version = "0.1.0"
+edition = "2021"
+license = "Proprietary"
+authors = ["Thomas Price"]
+description = "Multi-layer cognitive memory frame engine with grid cells, cross-connects, evolution, conflict resolution, and 3D visualization layout."
+
+[lib]
+name = "memory_frame"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_cbor = "0.11"
+serde_bytes = "0.11"
+rmp-serde = "1.1"
+zstd = "0.11"
+
+
+thiserror = "1.0"
+anyhow = "1.0"
+
+parking_lot = "0.12"
+dashmap = "5.5"
+
+rayon = "1.10"
+ndarray = "0.15"
+
+uuid = { version = "1.7", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+log = "0.4"
+env_logger = "0.11"
+
+# Visualization math (feature-gated)
+glam = { version = "0.27", optional = true }
+
+# Compression libraries (feature-gated)
+lz4_flex = { version = "0.11", optional = true }
+snap = { version = "1.1", optional = true }
+
+# Storage backend (feature-gated)
+sled = { version = "0.34", optional = true }
+
+# Always needed for serialization
+bincode = "1.3"
+
+# BitDrop-V2 compressor (local path dependency)
+bitdrop_v2 = { path = "../bitdrop_v2", package = "bitdrop_v2" }
+
+[features]
+# Enable everything by default so the crate builds with full functionality.
+default = ["viz", "compression", "storage_sled"]
+
+# Feature groups
+viz = ["glam"]
+compression = ["lz4_flex", "snap"]
+storage_sled = ["sled"]
+
+[dev-dependencies]
+criterion = "0.5"
+
