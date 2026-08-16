@@ -1,7 +1,6 @@
 ﻿// src/frame/cell.rs
 //
 
-
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use chrono::{DateTime, Utc};
@@ -25,7 +24,6 @@ impl Default for CellId {
     }
 }
 
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Cell {
     /// Unique coordinate identifier.
@@ -34,11 +32,9 @@ pub struct Cell {
     /// Confidence score representing strength or relevance (legacy).
     pub confidence: f32,
 
- 
     /// Initialize from `confidence` for backward compatibility when migrating old data.
     pub phase_pos: f32,
     pub phase_neg: f32,
-
 
     pub tags: Vec<String>,
 
@@ -64,7 +60,6 @@ impl Default for Cell {
 }
 
 impl Cell {
-
     pub fn new(id: CellId) -> Self {
         Self {
             id,
@@ -77,7 +72,6 @@ impl Cell {
         }
     }
 
-
     pub fn init_phases_from_confidence(&mut self) {
         if self.phase_pos == 0.0 && self.phase_neg == 0.0 {
             self.phase_pos = self.confidence;
@@ -85,22 +79,18 @@ impl Cell {
         }
     }
 
-
     pub fn touch(&mut self, new_confidence: f32) {
         self.confidence = new_confidence;
         self.last_updated = Some(Utc::now());
     }
 
-
     pub fn add_tag(&mut self, tag: impl Into<String>) {
         self.tags.push(tag.into());
     }
 
-
     pub fn set_metadata(&mut self, value: serde_json::Value) {
         self.metadata = Some(value);
     }
-
 
     pub fn has_tag(&self, tag: &str) -> bool {
         self.tags.iter().any(|t| t == tag)
@@ -110,16 +100,13 @@ impl Cell {
     // Phase helpers (Russell-inspired dual polarity)
     // -------------------------------------------------------------------------
 
-
     pub fn phase_net(&self) -> f32 {
         self.phase_pos - self.phase_neg
     }
 
-
     pub fn phase_magnitude(&self) -> f32 {
         self.phase_net().abs()
     }
-
 
     pub fn apply_phase_merge(&mut self, other: &Cell) {
         // Keep the stronger phase channels (max) to preserve polarity extremes.
@@ -137,7 +124,6 @@ impl Cell {
             }
         }
 
-
         self.last_updated = Some(Utc::now());
 
         // Merge metadata conservatively: prefer existing, else take other's.
@@ -147,20 +133,17 @@ impl Cell {
     }
 
     // -------------------------------------------------------------------------
-    // ðŸ”¥ DIAGONAL LAW UPGRADES (NO NEW GRID METHODS REQUIRED)
+    // 🔥 DIAGONAL LAW UPGRADES (NO NEW GRID METHODS REQUIRED)
     // -------------------------------------------------------------------------
-
 
     pub fn diagonal_semantic_boost(&self) -> f32 {
         let tag_count = self.tags.len() as f32;
         (1.0 + tag_count / 10.0).clamp(1.0, 1.5)
     }
 
-
     pub fn diagonal_confidence_influence(&self) -> f32 {
         (self.confidence * self.diagonal_semantic_boost()).clamp(0.0, 2.0)
     }
-
 
     pub fn diagonal_collapse_influence(&self) -> f32 {
         let base = self.confidence;
@@ -168,10 +151,9 @@ impl Cell {
         (base * sem).clamp(0.1, 2.0)
     }
 
-
     pub fn diagonal_signature(&self) -> u64 {
-        use std::hash::{Hash, Hasher};
         use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
 
         let mut hasher = DefaultHasher::new();
 
@@ -189,7 +171,41 @@ impl Cell {
 
         hasher.finish()
     }
+
+    // -------------------------------------------------------------------------
+    // 🔥 PERCEPTION HELPERS (CELL-LEVEL)
+    // -------------------------------------------------------------------------
+
+    /// Perception-adjusted confidence given a slice-level weight.
+    pub fn perceived_confidence_with_weight(&self, weight: f32) -> f32 {
+        (self.confidence * weight).clamp(0.0, 2.0)
+    }
+
+    /// Perception-adjusted semantic weight given a slice-level weight.
+    pub fn perceived_semantic_weight(&self, weight: f32) -> f32 {
+        (self.diagonal_semantic_boost() * weight).clamp(1.0, 3.0)
+    }
+
+    /// Perception-adjusted temporal decay based on current time.
+    pub fn perceived_temporal_decay(&self, now: DateTime<Utc>) -> f32 {
+        if let Some(ts) = self.last_updated {
+            let age = now.signed_duration_since(ts);
+            let secs = age.num_seconds().max(0) as f32;
+            (1.0 / (1.0 + secs / 10.0)).clamp(0.0, 1.0)
+        } else {
+            1.0
+        }
+    }
+
+    /// Perception-adjusted collapse influence combining confidence, semantic boost, and temporal decay.
+    pub fn perceived_collapse_with_weight(&self, weight: f32, now: DateTime<Utc>) -> f32 {
+        let decay = self.perceived_temporal_decay(now);
+        let sem = self.perceived_semantic_weight(weight);
+        let base = self.perceived_confidence_with_weight(weight);
+        (base * sem * decay).clamp(0.1, 3.0)
+    }
 }
+
 
 
 

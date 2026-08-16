@@ -10,6 +10,43 @@ use crate::layers::LayerId;
 use crate::frame::NavTarget;
 use chrono::{DateTime, Utc};
 
+/// Perception mode for view-dependent memory interpretation.
+/// This does not change the underlying data, only how it is "seen" and weighted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PerceptionMode {
+    /// Raw, structural view (existing behavior).
+    Default,
+    /// Emphasize semantic surfaces and tags.
+    SemanticFocus,
+    /// Emphasize temporal alignment and decay.
+    TemporalFocus,
+    /// Emphasize diagonal signatures and confidence surfaces.
+    DiagonalFocus,
+    /// Emphasize cross-connect topology.
+    CrossConnectFocus,
+}
+
+/// Lightweight, frame-level perception transform.
+/// Stores per-slice weights derived from the chosen mode.
+#[derive(Debug, Clone)]
+pub struct PerceptionTransform {
+    pub mode: PerceptionMode,
+    pub slice_weights: HashMap<SliceId, f32>,
+}
+
+impl PerceptionTransform {
+    pub fn new(mode: PerceptionMode) -> Self {
+        Self {
+            mode,
+            slice_weights: HashMap::new(),
+        }
+    }
+
+    pub fn weight_for(&self, id: &SliceId) -> f32 {
+        self.slice_weights.get(id).cloned().unwrap_or(1.0)
+    }
+}
+
 #[derive(Debug)]
 pub struct MemoryFrame {
     pub id: Uuid,
@@ -33,10 +70,17 @@ pub struct MemoryFrame {
     // 🔥 Adaptive rules / scoring (max-tier)
     pub adaptive_score: f32,
     pub last_adaptive: Option<AdaptiveScore>,
+
+    // 🔥 Perception: view-dependent weighting of slices
+    pub perception_mode: PerceptionMode,
+    pub perception_transform: PerceptionTransform,
 }
 
 impl MemoryFrame {
     pub fn new(policy: MemoryPolicy) -> Self {
+        let mode = PerceptionMode::Default;
+        let transform = PerceptionTransform::new(mode);
+
         Self {
             id: Uuid::new_v4(),
             slices: HashMap::new(),
@@ -56,12 +100,16 @@ impl MemoryFrame {
 
             adaptive_score: 0.0,
             last_adaptive: None,
+
+            perception_mode: mode,
+            perception_transform: transform,
         }
     }
 
     fn auto_adapt(&mut self) {
         self.recompute_diagonal_metrics();
         self.recompute_temporal_metrics();
+        self.recompute_perception_transform();
 
         let policy_local = self.policy.clone();
         let mut engine = AdaptiveRuleEngine::default();
@@ -202,6 +250,62 @@ impl MemoryFrame {
             }
             Some(cur_id) => {
                 // Find index of current in insertion order
+                let pos = order.iter().position(|id| *id == cur_id);
+
+                match target {
+                    NavTarget::FirstSlice => order.first().cloned(),
+                    NavTarget::LastSlice => order.last().cloned(),
+                    NavTarget::NextSlice => {
+                        if let Some(idx) = pos {
+                            if idx + 1 < order.len() {
+                                Some(order[idx + 1].clone())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    }
+                    NavTarget::PrevSlice => {
+                        if let Some(idx) = pos {
+                            if idx >= 1 {
+                                Some(order[idx - 1].clone())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Perception-aware navigation API.
+    /// Uses the same semantics as `navigate`, but operates on the perceived slice order
+    /// derived from the current `perception_mode`.
+    pub fn navigate_perceived(
+        &self,
+        current: Option<LayerId>,
+        target: NavTarget,
+    ) -> Option<SliceId> {
+        let order = self.perceived_slice_order();
+
+        if order.is_empty() {
+            return None;
+        }
+
+        match current {
+            None => {
+                match target {
+                    NavTarget::FirstSlice => order.first().cloned(),
+                    NavTarget::LastSlice => order.last().cloned(),
+                    NavTarget::NextSlice => None,
+                    NavTarget::PrevSlice => None,
+                }
+            }
+            Some(cur_id) => {
                 let pos = order.iter().position(|id| *id == cur_id);
 
                 match target {
@@ -410,7 +514,8 @@ impl MemoryFrame {
                     }
 
                     // Ensure we always take the lower index as the "primary" target for deterministic behavior
-                    let (primary_idx, neighbor_idx) = if idx < nidx { (idx, nidx) } else { (nidx, idx) };
+                    let (primary_idx, neighbor_idx) =
+                        if idx < nidx { (idx, nidx) } else { (nidx, idx) };
 
                     // At this point primary_idx < neighbor_idx guaranteed.
                     let (left, right) = slice.grid.cells.split_at_mut(neighbor_idx);
@@ -482,12 +587,17 @@ impl MemoryFrame {
                 if let Some(candidate_clone) = self.slices.get(&sid).cloned() {
                     if let Some(base_slice) = self.slices.get_mut(&match_id) {
                         // compute phase coherence for candidate
-                        let coherence = crate::frame::phase::phase_coherence(&candidate_clone.grid);
+                        let coherence =
+                            crate::frame::phase::phase_coherence(&candidate_clone.grid);
 
                         if coherence >= PHASE_COHERENCE_THRESHOLD {
                             // perform conservative cell-wise phase-aware merge:
                             // iterate cells by index and apply phase merge into base
-                            let len = base_slice.grid.cells.len().min(candidate_clone.grid.cells.len());
+                            let len = base_slice
+                                .grid
+                                .cells
+                                .len()
+                                .min(candidate_clone.grid.cells.len());
                             for i in 0..len {
                                 let base_cell = &mut base_slice.grid.cells[i];
                                 let cand_cell = &candidate_clone.grid.cells[i];
@@ -503,7 +613,9 @@ impl MemoryFrame {
 
                             // remove candidate slice (sid) from map and insertion order
                             self.slices.remove(&sid);
-                            if let Some(pos) = self.slice_order.iter().position(|x| x == &sid) {
+                            if let Some(pos) =
+                                self.slice_order.iter().position(|x| x == &sid)
+                            {
                                 self.slice_order.remove(pos);
                             }
                         }
@@ -515,8 +627,100 @@ impl MemoryFrame {
         // after compaction, recompute frame metrics and adaptive rules
         self.auto_adapt();
     }
-}
 
+    // -------------------------------------------------------------------------
+    // 🔥 PERCEPTION TRANSFORM (VIEW-DEPENDENT MEMORY)
+    // -------------------------------------------------------------------------
+
+    /// Set the current perception mode and recompute the transform.
+    pub fn set_perception_mode(&mut self, mode: PerceptionMode) {
+        self.perception_mode = mode;
+        self.recompute_perception_transform();
+    }
+
+    /// Recompute the perception transform based on the current mode and frame metrics.
+    fn recompute_perception_transform(&mut self) {
+        let mut transform = PerceptionTransform::new(self.perception_mode);
+
+        if self.slices.is_empty() {
+            self.perception_transform = transform;
+            return;
+        }
+
+        for (sid, slice) in &self.slices {
+            let mut weight: f32;
+
+            match self.perception_mode {
+                PerceptionMode::Default => {
+                    // Structural: use average confidence as baseline.
+                    weight = slice.average_confidence().max(0.1);
+                }
+                PerceptionMode::SemanticFocus => {
+                    // Emphasize semantic surface and tag richness.
+                    let sem = slice.diagonal_semantic_surface();
+                    let tag_count: f32 = slice
+                        .grid
+                        .cells
+                        .iter()
+                        .map(|c| c.tags.len() as f32)
+                        .sum();
+                    weight = (sem + tag_count.sqrt()).max(0.1);
+                }
+                PerceptionMode::TemporalFocus => {
+                    // Emphasize recency and temporal alignment.
+                    let align = self.temporal_alignment_score;
+                    let decay = self.temporal_decay_factor;
+                    weight = (align * decay).max(0.1);
+                }
+                PerceptionMode::DiagonalFocus => {
+                    // Emphasize diagonal signature and confidence surface.
+                    let diag = slice.diagonal_signature();
+                    let conf = slice.diagonal_confidence_surface();
+                    weight = (diag + conf).max(0.1);
+                }
+                PerceptionMode::CrossConnectFocus => {
+                    // Emphasize connectivity: number of links touching this slice.
+                    let connectivity = self
+                        .cross_connect
+                        .links_for_slice(sid)
+                        .map(|links| links.len() as f32)
+                        .unwrap_or(0.0);
+                    weight = (connectivity + 1.0).max(0.1);
+                }
+            }
+
+            transform.slice_weights.insert(sid.clone(), weight);
+        }
+
+        self.perception_transform = transform;
+    }
+
+    /// Return slice IDs ordered according to the current perception transform.
+    /// Higher-weight slices appear earlier; ties fall back to insertion order.
+    pub fn perceived_slice_order(&self) -> Vec<SliceId> {
+        if self.slices.is_empty() {
+            return Vec::new();
+        }
+
+        // Build (id, weight, insertion_index) triples to keep deterministic behavior.
+        let mut entries: Vec<(SliceId, f32, usize)> = Vec::new();
+
+        for (idx, sid) in self.slice_order.iter().enumerate() {
+            let w = self.perception_transform.weight_for(sid);
+            entries.push((sid.clone(), w, idx));
+        }
+
+        // Sort by weight descending, then by original insertion index ascending.
+        entries.sort_by(|a, b| {
+            b.1
+                .partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.2.cmp(&b.2))
+        });
+
+        entries.into_iter().map(|(sid, _, _)| sid).collect()
+    }
+}
 
 
 

@@ -15,6 +15,12 @@ pub use slice::{Slice, SliceId, SliceData};
 pub use cross_connect::{CrossConnect, Link};
 pub use memory_frame::MemoryFrame;
 
+// Perception system exports
+pub use crate::frame::memory_frame::PerceptionTransform;
+
+// LayerId must be exported for cross_connect + memory_frame
+pub use crate::layers::LayerId;
+
 pub use compression::{
     compress_slice_max,
     decompress_slice_max,
@@ -25,9 +31,3 @@ pub use compression::{
 
 // Navigation exports (needed by integration_navigation tests)
 pub use navigation::NavTarget;
-
-
-
-
-
-

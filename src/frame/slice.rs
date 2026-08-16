@@ -7,6 +7,9 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde::de::{self, MapAccess, Visitor};
 use std::fmt;
 
+// Bring in perception types from MemoryFrame (only the one we actually use)
+use crate::frame::memory_frame::PerceptionTransform;
+
 pub type SliceId = LayerId;
 
 /// SliceData: externally tagged enum representation: {"kind": "...", "value": ...}
@@ -28,7 +31,6 @@ impl Serialize for SliceData {
     where
         S: Serializer,
     {
-        // We'll serialize as an externally tagged map: {"kind": "<Variant>", "value": <...>}
         use serde::ser::SerializeStruct;
         match self {
             SliceData::Visual(v) => {
@@ -38,8 +40,6 @@ impl Serialize for SliceData {
                 st.end()
             }
             SliceData::Semantic(val) => {
-                // For compatibility with bincode (which doesn't implement deserialize_any),
-                // serialize the JSON Value as a JSON string.
                 let json_str = serde_json::to_string(val).map_err(serde::ser::Error::custom)?;
                 let mut st = serializer.serialize_struct("SliceData", 2)?;
                 st.serialize_field("kind", "Semantic")?;
@@ -79,13 +79,11 @@ impl<'de> Deserialize<'de> for SliceData {
     where
         D: Deserializer<'de>,
     {
-        // Expect a map with keys "kind" and "value"
         #[derive(Deserialize)]
         #[serde(field_identifier, rename_all = "lowercase")]
         enum Field {
             Kind,
             Value,
-            // allow unknown fields to be ignored
             #[serde(other)]
             Other,
         }
@@ -104,21 +102,6 @@ impl<'de> Deserialize<'de> for SliceData {
                 V: MapAccess<'de>,
             {
                 let mut kind_opt: Option<String> = None;
-                // We'll capture the raw serde value for "value" and then interpret it
-                // depending on the kind. To keep things flexible across formats,
-                // we accept different representations:
-                // - For Semantic: we expect a string (JSON text) and parse it.
-                // - For other variants: we attempt to deserialize into the expected type.
-                // To accomplish this, we use serde_json::Value as an intermediate for "value"
-                // when necessary, but prefer direct deserialization where possible.
-
-                // Because MapAccess doesn't let us peek keys easily, we read entries
-                // and stash the "value" raw bytes via serde's Value when needed.
-                // We'll use serde_value crate-like approach by deserializing the "value"
-                // into serde_json::Value when we don't know the kind yet.
-                //
-                // Simpler approach: read both fields in any order; when we see "value",
-                // store it as serde_json::Value via serde_json::Value::deserialize.
                 let mut raw_value: Option<serde_json::Value> = None;
 
                 while let Some(key) = map.next_key::<String>()? {
@@ -133,14 +116,10 @@ impl<'de> Deserialize<'de> for SliceData {
                             if raw_value.is_some() {
                                 return Err(de::Error::duplicate_field("value"));
                             }
-                            // Deserialize the "value" into serde_json::Value using the incoming format.
-                            // This works for most serde formats (bincode, cbor, msgpack) because
-                            // serde_json::Value implements Deserialize for those formats as well.
                             let v = map.next_value::<serde_json::Value>()?;
                             raw_value = Some(v);
                         }
                         _ => {
-                            // Unknown field: skip it
                             let _ = map.next_value::<serde_json::Value>()?;
                         }
                     }
@@ -151,25 +130,17 @@ impl<'de> Deserialize<'de> for SliceData {
 
                 match kind.as_str() {
                     "Visual" => {
-                        // Expect raw to be a sequence of bytes; try to deserialize into Vec<u8>
                         let vec: Vec<u8> = serde_json::from_value(raw).map_err(de::Error::custom)?;
                         Ok(SliceData::Visual(vec))
                     }
                     "Semantic" => {
-                        // We serialized Semantic as a JSON string for bincode compatibility.
-                        // Accept either:
-                        //  - a JSON string containing the JSON text (preferred for bincode),
-                        //  - or a direct JSON object (if the format supports deserialize_any).
                         match raw {
                             serde_json::Value::String(s) => {
                                 let parsed: serde_json::Value =
                                     serde_json::from_str(&s).map_err(de::Error::custom)?;
                                 Ok(SliceData::Semantic(parsed))
                             }
-                            other => {
-                                // If the incoming format provided a direct object, accept it.
-                                Ok(SliceData::Semantic(other))
-                            }
+                            other => Ok(SliceData::Semantic(other)),
                         }
                     }
                     "Temporal" => {
@@ -189,12 +160,17 @@ impl<'de> Deserialize<'de> for SliceData {
                         let s: String = serde_json::from_value(raw).map_err(de::Error::custom)?;
                         Ok(SliceData::Declarative(s))
                     }
-                    other => Err(de::Error::unknown_variant(other, &["Visual","Semantic","Temporal","Emotional","Relational","Declarative"])),
+                    other => Err(de::Error::unknown_variant(
+                        other,
+                        &[
+                            "Visual", "Semantic", "Temporal", "Emotional", "Relational",
+                            "Declarative",
+                        ],
+                    )),
                 }
             }
         }
 
-        // Deserialize the incoming map using our visitor
         const FIELDS: &'static [&'static str] = &["kind", "value"];
         deserializer.deserialize_struct("SliceData", FIELDS, SliceDataVisitor)
     }
@@ -387,8 +363,58 @@ impl Slice {
             c.init_phases_from_confidence();
         }
     }
-}
 
+    // -------------------------------------------------------------------------
+    // 🔥 PERCEPTION-AWARE METRICS
+    // -------------------------------------------------------------------------
+
+    /// Perception-adjusted diagonal signature.
+    pub fn perceived_diagonal_signature(&self, transform: &PerceptionTransform) -> f32 {
+        let base = self.diagonal_signature();
+        let w = transform.weight_for(&self.id);
+        (base * w).clamp(0.0, 3.0)
+    }
+
+    /// Perception-adjusted semantic surface.
+    pub fn perceived_semantic_surface(&self, transform: &PerceptionTransform) -> f32 {
+        let base = self.diagonal_semantic_surface();
+        let w = transform.weight_for(&self.id);
+        (base * w).clamp(0.0, 3.0)
+    }
+
+    /// Perception-adjusted confidence surface.
+    pub fn perceived_confidence_surface(&self, transform: &PerceptionTransform) -> f32 {
+        let base = self.diagonal_confidence_surface();
+        let w = transform.weight_for(&self.id);
+        (base * w).clamp(0.0, 3.0)
+    }
+
+    /// Perception-adjusted collapse influence.
+    pub fn perceived_collapse_influence(&self, transform: &PerceptionTransform) -> f32 {
+        let base = self.diagonal_collapse_influence();
+        let w = transform.weight_for(&self.id);
+        (base * w).clamp(0.0, 3.0)
+    }
+
+    /// Perception-adjusted cell iterator (optional but powerful).
+    pub fn perceived_cells<'a>(
+        &'a self,
+        transform: &PerceptionTransform,
+    ) -> Vec<&'a crate::frame::Cell> {
+        let mut cells: Vec<&crate::frame::Cell> = self.grid.cells.iter().collect();
+
+        let w = transform.weight_for(&self.id);
+
+        // Sort by confidence × perception weight
+        cells.sort_by(|a, b| {
+            let wa = a.confidence * w;
+            let wb = b.confidence * w;
+            wb.partial_cmp(&wa).unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        cells
+    }
+}
 
 
 

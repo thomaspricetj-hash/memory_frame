@@ -4,6 +4,8 @@
 // Ensure `Cell` and `CellId` types also derive Serialize/Deserialize/Debug/Clone/PartialEq.
 
 use crate::frame::{Cell, CellId};
+use crate::frame::memory_frame::PerceptionTransform;
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher, DefaultHasher};
@@ -75,7 +77,7 @@ impl Grid {
     }
 
     // ---------------------------------------------------------
-    // ðŸ”¥ DIAGONAL LAW OF THE NINE-MATRIX (MAX TIER)
+    // 🔥 DIAGONAL LAW OF THE NINE-MATRIX (MAX TIER)
     // ---------------------------------------------------------
 
     /// Returns the 4 orthogonal neighbors (Von Neumann).
@@ -104,7 +106,7 @@ impl Grid {
         out
     }
 
-    /// ðŸ”¥ Returns the 4 diagonal neighbors (Nine-Matrix diagonals).
+    /// 🔥 Returns the 4 diagonal neighbors (Nine-Matrix diagonals).
     pub fn diagonal_neighbors(&self, id: CellId) -> Vec<CellId> {
         let mut out = Vec::with_capacity(4);
 
@@ -130,7 +132,7 @@ impl Grid {
         out
     }
 
-    /// ðŸ”¥ Diagonal weight: how strong diagonal influence is for a cell.
+    /// 🔥 Diagonal weight: how strong diagonal influence is for a cell.
     pub fn diagonal_weight(&self, id: CellId) -> f32 {
         let cx = (self.width as f32) / 2.0;
         let cy = (self.height as f32) / 2.0;
@@ -144,7 +146,7 @@ impl Grid {
         w.clamp(0.25, 1.0)
     }
 
-    /// ðŸ”¥ Diagonal semantic boost: increases tag influence along diagonals.
+    /// 🔥 Diagonal semantic boost: increases tag influence along diagonals.
     pub fn diagonal_tag_boost(&self, id: CellId, tag: &str) -> f32 {
         let w = self.diagonal_weight(id);
 
@@ -153,7 +155,7 @@ impl Grid {
         (base * w).clamp(1.0, 2.0)
     }
 
-    /// ðŸ”¥ Diagonal confidence propagation: blends confidence across diagonals.
+    /// 🔥 Diagonal confidence propagation: blends confidence across diagonals.
     pub fn diagonal_confidence(&self, id: CellId) -> f32 {
         let diag = self.diagonal_neighbors(id);
 
@@ -178,7 +180,7 @@ impl Grid {
         (own * 0.6) + (avg * 0.4)
     }
 
-    /// ðŸ”¥ BitDropâ€‘V2 diagonal block signature (max-tier hybrid)
+    /// 🔥 BitDrop‑V2 diagonal block signature (max-tier hybrid)
     pub fn diagonal_block_signature(&self, id: CellId) -> u64 {
         let mut hasher = DefaultHasher::new();
 
@@ -201,7 +203,7 @@ impl Grid {
         hasher.finish()
     }
 
-    /// ðŸ”¥ Diagonal influence map: returns diagonal weight for every cell.
+    /// 🔥 Diagonal influence map: returns diagonal weight for every cell.
     pub fn diagonal_map(&self) -> Vec<(CellId, f32)> {
         self.cells
             .iter()
@@ -276,6 +278,63 @@ impl Grid {
             }
         }
         tags
+    }
+
+    // ---------------------------------------------------------------------
+    // 🔥 PERCEPTION-AWARE HELPERS
+    // ---------------------------------------------------------------------
+
+    /// Perception-adjusted diagonal weight for a cell.
+    pub fn perceived_diagonal_weight(
+        &self,
+        id: CellId,
+        transform: &PerceptionTransform,
+        slice_id: &crate::layers::LayerId,
+    ) -> f32 {
+        let base = self.diagonal_weight(id);
+        let w = transform.weight_for(slice_id);
+        (base * w).clamp(0.1, 2.0)
+    }
+
+    /// Perception-adjusted diagonal confidence for a cell.
+    pub fn perceived_diagonal_confidence(
+        &self,
+        id: CellId,
+        transform: &PerceptionTransform,
+        slice_id: &crate::layers::LayerId,
+    ) -> f32 {
+        let base = self.diagonal_confidence(id);
+        let w = transform.weight_for(slice_id);
+        (base * w).clamp(0.0, 2.0)
+    }
+
+    /// Perception-adjusted diagonal block signature.
+    pub fn perceived_diagonal_block_signature(
+        &self,
+        id: CellId,
+        transform: &PerceptionTransform,
+        slice_id: &crate::layers::LayerId,
+    ) -> u64 {
+        let base = self.diagonal_block_signature(id);
+        let w = transform.weight_for(slice_id);
+        // Simple mixing: scale by weight bucket and xor with weight bits.
+        let bucket = (w * 1024.0).round() as u64;
+        base ^ bucket
+    }
+
+    /// Perception-adjusted influence map: diagonal weight modulated by perception.
+    pub fn perceived_diagonal_map(
+        &self,
+        transform: &PerceptionTransform,
+        slice_id: &crate::layers::LayerId,
+    ) -> Vec<(CellId, f32)> {
+        self.cells
+            .iter()
+            .map(|c| {
+                let w = self.perceived_diagonal_weight(c.id, transform, slice_id);
+                (c.id, w)
+            })
+            .collect()
     }
 }
 

@@ -8,11 +8,11 @@ pub struct Link {
     pub to: CellId,
     pub weight: f32,
 
-    /// Diagonal propagation weight (Nineâ€‘Matrix style) for this link.
+    /// Diagonal propagation weight (Nine‑Matrix style) for this link.
     pub diagonal_weight: f32,
 
     /// Collapse influence: how strongly this link participates in
-    /// multiâ€‘hop collapse / convergence.
+    /// multi‑hop collapse / convergence.
     pub collapse_influence: f32,
 }
 
@@ -20,11 +20,11 @@ pub struct Link {
 /// Each cell may have multiple outgoing links.
 #[derive(Debug, Clone)]
 pub struct CrossConnect {
-    /// Mapping: CellId â†’ outgoing links
+    /// Mapping: CellId → outgoing links
     pub links: HashMap<CellId, Vec<Link>>,
 
-    /// Diagonal frame signature: a hashâ€‘like scalar summarizing
-    /// the diagonal structure of the crossâ€‘layer graph.
+    /// Diagonal frame signature: a hash‑like scalar summarizing
+    /// the diagonal structure of the cross‑layer graph.
     pub diagonal_frame_signature: f32,
 
     /// Diagonal semantic surface: aggregate diagonal weight across all links.
@@ -35,11 +35,11 @@ pub struct CrossConnect {
     pub diagonal_temporal_alignment: f32,
 
     /// Diagonal propagation weight: global scaling factor for
-    /// diagonalâ€‘aware traversal and reasoning.
+    /// diagonal‑aware traversal and reasoning.
     pub diagonal_propagation_weight: f32,
 
     /// Diagonal collapse influence: global scalar used to modulate
-    /// multiâ€‘hop collapse / convergence behavior.
+    /// multi‑hop collapse / convergence behavior.
     pub diagonal_collapse_influence: f32,
 }
 
@@ -56,7 +56,7 @@ impl CrossConnect {
     }
 
     /// Add a link, avoiding duplicates and normalizing weight.
-    /// Also computes perâ€‘link diagonal weight and collapse influence.
+    /// Also computes per‑link diagonal weight and collapse influence.
     pub fn add_link(&mut self, from: CellId, to: CellId, weight: f32) {
         let weight = weight.clamp(0.0, 1.0);
 
@@ -67,7 +67,6 @@ impl CrossConnect {
 
         // Avoid duplicate links
         if let Some(existing) = entry.iter_mut().find(|l| l.to == to) {
-            // Strengthen existing link instead of duplicating
             existing.weight = existing.weight.max(weight);
             existing.diagonal_weight = existing.diagonal_weight.max(diag_w);
             existing.collapse_influence = existing.collapse_influence.max(collapse_inf);
@@ -110,12 +109,27 @@ impl CrossConnect {
             .unwrap_or_default()
     }
 
+    /// Returns all links that touch the frame; slice_id is accepted
+    /// for API compatibility but not used for filtering (no LayerId
+    /// information is present in CellId).
+    pub fn links_for_slice(
+        &self,
+        _slice_id: &crate::layers::LayerId,
+    ) -> Option<Vec<Link>> {
+        let mut out = Vec::new();
+
+        for vec in self.links.values() {
+            out.extend(vec.iter().cloned());
+        }
+
+        if out.is_empty() {
+            None
+        } else {
+            Some(out)
+        }
+    }
+
     /// Multi-hop traversal with hop-aware decay and diagonal propagation.
-    /// Uses:
-    /// - hop-aware decay
-    /// - per-link diagonal weight
-    /// - global diagonal propagation weight
-    /// - global collapse influence
     pub fn traverse_multi_hop(
         &self,
         start: CellId,
@@ -131,10 +145,8 @@ impl CrossConnect {
             for (node, weight) in frontier {
                 if let Some(outgoing) = self.links.get(&node) {
                     for link in outgoing {
-                        // hop-aware decay: deeper hops reduce influence
                         let hop_decay = 1.0 - (decay_per_hop * hop as f32);
 
-                        // diagonal propagation + collapse influence
                         let diag_factor =
                             link.diagonal_weight * self.diagonal_propagation_weight;
                         let collapse_factor =
@@ -160,7 +172,6 @@ impl CrossConnect {
     }
 
     /// Normalize all link weights so each cell's outgoing links sum to 1.0.
-    /// Also recomputes diagonal metrics after normalization.
     pub fn normalize(&mut self) {
         for (_id, vec) in self.links.iter_mut() {
             let sum: f32 = vec.iter().map(|l| l.weight).sum();
@@ -183,15 +194,12 @@ impl CrossConnect {
 
         for (from, vec) in &self.links {
             for link in vec {
-                // diagonal semantic surface: sum of diagonal weights
                 total_diag += link.diagonal_weight;
 
-                // frame signature: mix coordinates + weights
                 let dx = (link.to.x as f32 - from.x as f32).abs();
                 let dy = (link.to.y as f32 - from.y as f32).abs();
                 total_weight += (dx + dy) * link.weight;
 
-                // collapse influence
                 total_collapse += link.collapse_influence;
                 count += 1.0;
             }
@@ -206,25 +214,20 @@ impl CrossConnect {
             return;
         }
 
-        // simple normalized metrics
         self.diagonal_semantic_surface = total_diag / count;
         self.diagonal_frame_signature = total_weight / count;
 
-        // temporal alignment: here approximated as how â€œbalancedâ€ diagonal weights are
         self.diagonal_temporal_alignment =
             1.0 - (self.diagonal_semantic_surface - 0.5).abs().clamp(0.0, 1.0);
 
-        // propagation weight: stronger when semantic surface is high
         self.diagonal_propagation_weight =
             (self.diagonal_semantic_surface + self.diagonal_temporal_alignment) / 2.0;
 
-        // collapse influence: stronger when average collapse influence is high
         self.diagonal_collapse_influence = (total_collapse / count).clamp(0.25, 2.0);
     }
 }
 
 /// Per-link diagonal weight based on cell coordinates.
-/// Stronger when link follows a diagonal path.
 fn diagonal_weight_for_cells(from: CellId, to: CellId) -> f32 {
     let dx = (to.x as f32 - from.x as f32).abs();
     let dy = (to.y as f32 - from.y as f32).abs();
@@ -244,6 +247,7 @@ fn collapse_influence_for_link(weight: f32, diag_w: f32) -> f32 {
     let diag = diag_w;
     (base * diag).clamp(0.1, 2.0)
 }
+
 
 
 

@@ -135,7 +135,8 @@ const ZSTD_MAGIC: [u8; 4] = [0x28u8, 0xB5u8, 0x2Fu8, 0xFDu8];
 /// 4) MessagePack (rmp-serde)
 /// 5) CBOR
 /// 6) JSON (last resort)
-fn try_deserialize_variants(decompressed: &[u8], body_for_diag: &[u8]) -> Result<Slice> {
+fn try_deserialize_variants(decompressed: &[u8], _body_for_diag: &[u8]) -> Result<Slice>
+ {
     // 1) canonical bincode
     if let Ok(s) = bincode::deserialize::<Slice>(decompressed) {
         return Ok(s);
